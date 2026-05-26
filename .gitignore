@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+# Data/parquet/ — intentionally committed so the app works on Posit Connect Cloud
