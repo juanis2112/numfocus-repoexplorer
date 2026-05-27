@@ -140,6 +140,54 @@ def has_file(owner_repo: str, path: str) -> bool:
     return resp.status_code == 200
 
 
+# Common license filename variants found in the wild.
+# GitHub's Contents API is case-sensitive, so we probe both cases.
+# Also covers projects that put licenses in a licenses/ subdirectory (e.g. TARDIS).
+_LICENSE_PATHS = [
+    # Root — uppercase (most common)
+    "LICENSE", "LICENSE.txt", "LICENSE.md", "LICENSE.rst",
+    # Root — lowercase (Cantera, GDAL, etc.)
+    "license", "license.txt", "license.md", "license.rst",
+    # British spelling
+    "LICENCE", "LICENCE.txt", "LICENCE.md",
+    "licence", "licence.txt",
+    # COPYING variants (GPL-style)
+    "COPYING", "COPYING.txt", "COPYING.md", "COPYING.rst",
+    # Compound names
+    "LICENSE-MIT", "LICENSE-APACHE", "LICENSE.Apache-2.0",
+    # licenses/ subdirectory (TARDIS uses licenses/LICENSE.rst)
+    "licenses/LICENSE", "licenses/LICENSE.txt", "licenses/LICENSE.md",
+    "licenses/LICENSE.rst", "licenses/license.rst", "licenses/COPYING",
+]
+
+def fetch_license_fallback(owner_repo: str) -> Optional[str]:
+    """
+    When the GitHub repo API returns no license, probe the repo root for
+    common license filenames via the Contents API.
+
+    Returns the SPDX ID if GitHub can identify it, "OTHER" if a license
+    file is found but unclassified, or None if nothing is found.
+    """
+    for path in _LICENSE_PATHS:
+        url = f"{BASE_URL}/repos/{owner_repo}/contents/{path}"
+        resp = requests.get(url, headers=HEADERS, timeout=20)
+        if resp.status_code == 200:
+            # The Contents API sometimes includes a license sub-object
+            try:
+                data = resp.json()
+                if isinstance(data, dict):
+                    # Try to get SPDX from the file metadata (rare but possible)
+                    spdx = (data.get("license") or {}).get("spdx_id")
+                    if spdx and spdx not in ("NOASSERTION", ""):
+                        log.info("  License fallback: found %s via %s", spdx, path)
+                        return spdx
+            except Exception:
+                pass
+            log.info("  License fallback: found license file '%s' (marking OTHER)", path)
+            return "OTHER"
+    return None
+
+
 def check_community_files(owner_repo: str) -> dict:
     """
     Use the GitHub community profile endpoint to check for:
@@ -200,6 +248,21 @@ def fetch_languages(owner_repo: str) -> dict:
     url = f"{BASE_URL}/repos/{owner_repo}/languages"
     data = _get(url)
     return data if isinstance(data, dict) else {}
+
+
+def fetch_org(org: str) -> dict:
+    """Return the /orgs/{org} payload, or {} on failure."""
+    data = _get(f"{BASE_URL}/orgs/{org}")
+    return data if isinstance(data, dict) else {}
+
+
+def fetch_org_top_repos(org: str, n: int = 10) -> list:
+    """Return the top-n public repos in an org, sorted by stars."""
+    data = _get(
+        f"{BASE_URL}/orgs/{org}/repos",
+        params={"sort": "stars", "direction": "desc", "per_page": n, "type": "public"},
+    )
+    return data if isinstance(data, list) else []
 
 
 def fetch_scorecard(owner_repo: str) -> Optional[dict]:
@@ -265,11 +328,104 @@ def bus_factor_estimate(owner_repo: str, top_n: int = 2, threshold: float = 0.5)
 # Main collection loop
 # ---------------------------------------------------------------------------
 
+def collect_org_project(proj: dict) -> dict:
+    """
+    Collect aggregate GitHub metrics for projects that span a whole GitHub
+    organisation (e.g. rOpenSci, Bioconductor) rather than a single repo.
+    Stars, forks, and open issues are summed across the top-10 repos by stars.
+    """
+    org = proj.get("github_org", "")
+    log.info("Collecting org  %s  (%s)", proj["name"], org)
+
+    row: dict = {
+        "name":           proj["name"],
+        "numfocus_slug":  proj.get("numfocus_slug", ""),
+        "numfocus_url":   proj.get("numfocus_url", ""),
+        "website":        proj.get("website", ""),
+        "github_repo":    "",
+        "github_org":     org,
+        "is_org":         True,
+        "language_tags":  "|".join(proj.get("language_tags", [])),
+        "feature_tags":   "|".join(proj.get("feature_tags", [])),
+        "industry_tags":  "|".join(proj.get("industry_tags", [])),
+        "sponsored_since": proj.get("sponsored_since"),
+        "html_url":       f"https://github.com/{org}",
+        "description":    None,
+        "primary_language": None,
+        "license":        None,
+        "stargazers_count": None,
+        "forks_count":    None,
+        "open_issues_count": None,
+        "watchers_count": None,
+        "subscribers_count": None,
+        "size_kb":        None,
+        "created_at":     None,
+        "updated_at":     None,
+        "pushed_at":      None,
+        "is_fork":        False,
+        "default_branch": None,
+        "topics":         None,
+        "has_wiki":       None,
+        "has_discussions": None,
+        "contributor_count": None,
+        "bus_factor":     None,
+        "release_downloads": None,
+        "top_languages":  None,
+        "public_repos":   None,
+        # health fields not meaningful at org level
+        "has_readme":     None,
+        "has_contributing": None,
+        "has_code_of_conduct": None,
+        "has_license":    None,
+        "has_security_policy": None,
+        "has_issue_template": None,
+        "has_pull_request_template": None,
+        "health_percentage": None,
+    }
+
+    if not org:
+        return row
+
+    org_data = fetch_org(org)
+    if org_data:
+        row.update({
+            "description":  org_data.get("description"),
+            "html_url":     org_data.get("html_url", f"https://github.com/{org}"),
+            "created_at":   org_data.get("created_at"),
+            "public_repos": org_data.get("public_repos"),
+        })
+
+    # Aggregate stats across top repos
+    top_repos = fetch_org_top_repos(org)
+    if top_repos:
+        row["stargazers_count"]  = sum(r.get("stargazers_count", 0) for r in top_repos)
+        row["forks_count"]       = sum(r.get("forks_count", 0)       for r in top_repos)
+        row["open_issues_count"] = sum(r.get("open_issues_count", 0) for r in top_repos)
+        langs = [r.get("language") for r in top_repos if r.get("language")]
+        if langs:
+            row["primary_language"] = max(set(langs), key=langs.count)
+            row["top_languages"]    = "|".join(dict.fromkeys(l for l in langs if l))
+        most_recent = max(
+            (r.get("pushed_at") for r in top_repos if r.get("pushed_at")),
+            default=None,
+        )
+        row["pushed_at"] = most_recent
+
+    log.info("  Org %s: %d repos, %s stars (top-10 aggregate)",
+             org, row["public_repos"] or 0, row["stargazers_count"] or 0)
+    return row
+
+
 def collect_project(proj: dict) -> dict:
     """
     Given a project seed dict, fetch all GitHub metrics and return
     a combined row dict ready for DataFrame construction.
+    Dispatches to collect_org_project() for org-level entries.
     """
+    # --- Dispatch: org-level projects ---
+    if proj.get("github_org"):
+        return collect_org_project(proj)
+
     repo_path = proj.get("github_repo", "")
     log.info("Collecting  %s  (%s)", proj["name"], repo_path)
 
@@ -280,10 +436,13 @@ def collect_project(proj: dict) -> dict:
         "numfocus_url":      proj.get("numfocus_url", ""),
         "website":           proj.get("website", ""),
         "github_repo":       repo_path,
+        "github_org":        "",        # only set for org-level entries
+        "is_org":            False,
         "language_tags":     "|".join(proj.get("language_tags", [])),
         "feature_tags":      "|".join(proj.get("feature_tags", [])),
         "industry_tags":     "|".join(proj.get("industry_tags", [])),
         "sponsored_since":   proj.get("sponsored_since"),
+        "public_repos":      None,      # only meaningful for orgs
         # GitHub fields (default null)
         "html_url":          None,
         "description":       None,
@@ -326,11 +485,16 @@ def collect_project(proj: dict) -> dict:
     repo = fetch_repo(repo_path)
     if repo:
         lic = repo.get("license") or {}
+        license_val = lic.get("spdx_id") or lic.get("name")
+        # GitHub can't always classify licenses (numpy, matplotlib, etc.).
+        # If the API returns nothing, fall back to probing the repo root directly.
+        if not license_val or license_val in ("NOASSERTION", ""):
+            license_val = fetch_license_fallback(repo_path)
         row.update({
             "html_url":          repo.get("html_url"),
             "description":       repo.get("description"),
             "primary_language":  repo.get("language"),
-            "license":           lic.get("spdx_id") or lic.get("name"),
+            "license":           license_val,
             "stargazers_count":  repo.get("stargazers_count"),
             "forks_count":       repo.get("forks_count"),
             "open_issues_count": repo.get("open_issues_count"),
@@ -351,6 +515,11 @@ def collect_project(proj: dict) -> dict:
 
     # ---- Community health ----
     community = check_community_files(repo_path)
+    # The community profile API also misses unclassified licenses.
+    # If we already know a license file exists (from the fallback above),
+    # make sure has_license reflects that — no extra API call needed.
+    if not community.get("has_license") and row.get("license"):
+        community["has_license"] = True
     row.update(community)
 
     # ---- Contributor count ----

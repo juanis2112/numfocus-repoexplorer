@@ -544,9 +544,12 @@ with ui.navset_pill(id="main_tab", selected="Overview"):
                         for t in raw.split("|") if t.strip()
                     ])
 
-                gh_url  = _safe(sel.get("html_url"),      "")
-                nf_url  = _safe(sel.get("numfocus_url"),  "")
-                website = _safe(sel.get("website"),        "")
+                gh_url   = _safe(sel.get("html_url"),      "")
+                nf_url   = _safe(sel.get("numfocus_url"),  "")
+                website  = _safe(sel.get("website"),        "")
+                is_org   = bool(sel.get("is_org", False))
+                gh_org   = _safe(sel.get("github_org"),    "")
+                pub_repos = sel.get("public_repos")
 
                 def _link(url):
                     return (ui.tags.a(url, href=url, target="_blank")
@@ -575,6 +578,12 @@ with ui.navset_pill(id="main_tab", selected="Overview"):
                                      _safe(sel.get("license"))),
                                 ui.p(ui.tags.span("Sponsored since: ",class_="metric-label"),
                                      _safe(sel.get("sponsored_since"))),
+                                *([ ui.p(ui.tags.span("Type: ", class_="metric-label"),
+                                         ui.span("GitHub Organisation 🏢",
+                                                 style="color:#888; font-style:italic;")),
+                                    ui.p(ui.tags.span("Public repos: ", class_="metric-label"),
+                                         str(int(pub_repos)) if pub_repos is not None and pd.notna(pub_repos) else "—"),
+                                  ] if is_org else []),
                                 ui.p(ui.tags.span("GitHub: ",         class_="metric-label"),
                                      _link(gh_url)),
                                 ui.p(ui.tags.span("NumFOCUS page: ",  class_="metric-label"),
@@ -583,6 +592,10 @@ with ui.navset_pill(id="main_tab", selected="Overview"):
                                      _link(website)),
                             ),
                             sui.nav_panel("Impact",
+                                ui.p("⚠️ Stats below are aggregated from this organisation's top-10 repos by stars.",
+                                     class_="text-muted small",
+                                     style="font-style:italic; margin-bottom:8px;",
+                                ) if is_org else ui.span(""),
                                 ui.tags.table(
                                     *[ui.tags.tr(
                                         ui.tags.td(lbl, class_="metric-label",
@@ -954,11 +967,20 @@ def filtered_df() -> pd.DataFrame:
 @reactive.calc
 def _projects_table_df() -> pd.DataFrame:
     data = filtered_df()
-    show = [c for c in ["name", "language_tags", "feature_tags",
+    show = [c for c in ["name", "is_org", "language_tags", "feature_tags",
                          "primary_language", "license", "stargazers_count",
                          "forks_count", "contributor_count",
                          "sponsored_since", "html_url"] if c in data.columns]
-    out = data[show].rename(columns={
+    out = data[show].copy()
+
+    # Prefix org entries with a badge so they're visually distinct in the table
+    if "is_org" in out.columns and "name" in out.columns:
+        out["name"] = out.apply(
+            lambda r: f"🏢 {r['name']}" if r.get("is_org") else r["name"], axis=1
+        )
+        out = out.drop(columns=["is_org"])
+
+    out = out.rename(columns={
         "name": "Project", "language_tags": "Language",
         "feature_tags": "Features", "primary_language": "GitHub lang",
         "license": "License", "stargazers_count": "Stars",

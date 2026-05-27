@@ -1,0 +1,60 @@
+name: Update dashboard data
+
+# ── When to run ──────────────────────────────────────────────────────────────
+on:
+  schedule:
+    # Every Monday at 07:00 UTC — adjust to taste
+    # Use https://crontab.guru to pick a different cadence
+    - cron: "0 7 * * 1"
+
+  # Also allow a one-click manual run from the Actions tab
+  workflow_dispatch:
+
+# ── Job ───────────────────────────────────────────────────────────────────────
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed to push the updated parquet files back
+
+    steps:
+      # 1 ── Check out the repo
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2 ── Python environment
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # 3 ── Collect data
+      #
+      # IMPORTANT: GitHub Actions reserves the name GITHUB_TOKEN for its own
+      # bot token. Store your personal token as GH_DATA_TOKEN so the
+      # data-collection script gets your 5,000 req/hr authenticated limit.
+      - name: Collect GitHub + Scorecard data
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_DATA_TOKEN }}
+        run: python collect_data.py
+
+      # 4 ── Commit updated parquet files back to main
+      #
+      # Posit Connect Cloud watches this repo and redeploys automatically
+      # whenever a new commit lands on main — no rsconnect step needed.
+      - name: Commit updated data
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Data/parquet/
+          # Only commit (and therefore trigger a redeploy) if data changed
+          if git diff --staged --quiet; then
+            echo "No data changes — skipping commit and redeploy."
+          else
+            git commit -m "chore: refresh data [$(date -u '+%Y-%m-%d')]"
+            git push
+          fi
