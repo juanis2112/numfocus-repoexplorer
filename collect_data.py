@@ -203,14 +203,27 @@ def check_community_files(owner_repo: str) -> dict:
         return {}
 
     files = data.get("files", {}) or {}
+
+    # The community profile API only detects the legacy single-file issue template
+    # (ISSUE_TEMPLATE.md). Modern repos use a directory of .yml / .md files at
+    # .github/ISSUE_TEMPLATE/ — probe that directory directly as a fallback.
+    api_has_issue_template = files.get("issue_template") is not None
+    if not api_has_issue_template:
+        api_has_issue_template = has_file(owner_repo, ".github/ISSUE_TEMPLATE")
+
+    # Same problem for PR templates stored in .github/PULL_REQUEST_TEMPLATE/
+    api_has_pr_template = files.get("pull_request_template") is not None
+    if not api_has_pr_template:
+        api_has_pr_template = has_file(owner_repo, ".github/PULL_REQUEST_TEMPLATE")
+
     result = {
         "has_readme":                files.get("readme") is not None,
         "has_contributing":          files.get("contributing") is not None,
         "has_code_of_conduct":       files.get("code_of_conduct") is not None,
         "has_license":               files.get("license") is not None,
-        "has_security_policy":       False,   # overridden below
-        "has_issue_template":        files.get("issue_template") is not None,
-        "has_pull_request_template": files.get("pull_request_template") is not None,
+        "has_security_policy":       False,              # overridden below
+        "has_issue_template":        api_has_issue_template,
+        "has_pull_request_template": api_has_pr_template,
         "health_percentage":         data.get("health_percentage"),
         "description":               data.get("description"),
     }
