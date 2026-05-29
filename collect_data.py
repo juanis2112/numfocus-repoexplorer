@@ -216,7 +216,7 @@ def check_community_files(owner_repo: str) -> dict:
     }
 
     # GitHub's community API misses many SECURITY.md files.
-    # Directly probe the three locations GitHub itself searches.
+    # Directly probe the three locations GitHub itself searches inside the repo.
     security_paths = [
         "SECURITY.md",
         ".github/SECURITY.md",
@@ -226,6 +226,17 @@ def check_community_files(owner_repo: str) -> dict:
         if has_file(owner_repo, path):
             result["has_security_policy"] = True
             break
+
+    # If still not found, check the organisation-level .github repo.
+    # Many projects (e.g. pandas-dev, numpy) store their security policy at
+    # {org}/.github → SECURITY.md rather than inside each individual repo.
+    # GitHub treats this as applying to all repos in the org.
+    if not result["has_security_policy"]:
+        org = owner_repo.split("/")[0]
+        # The org .github repo is at github.com/{org}/.github
+        if has_file(f"{org}/.github", "SECURITY.md"):
+            result["has_security_policy"] = True
+            log.info("  Security policy found in org .github repo (%s/.github)", org)
 
     return result
 
